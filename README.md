@@ -1,79 +1,74 @@
-# Multimodal Visual Question Answering on VizWiz
+# Multimodal VQA for Visual Accessibility
 
-Empirical study of multimodal VQA architectures on the [VizWiz dataset](https://vizwiz.org/) — a benchmark of real images taken by blind users paired with spoken questions. The dataset is notably challenging due to low image quality, motion blur, and highly variable answer distributions.
+Visual Question Answering system built for the [VizWiz dataset](https://vizwiz.org/) — a benchmark of real photos taken by blind users paired with spoken questions. The dataset is uniquely difficult: images are often blurry or poorly framed, questions are conversational, and answers are highly variable across annotators.
 
-**Course:** CSCI 5922 — Neural Networks | University of Colorado Boulder
+The project explores two approaches to multimodal fusion: training directly on raw images with a custom transformer architecture, and leveraging frozen CLIP embeddings for faster, feature-level reasoning.
 
 ---
 
 ## Results
 
-| Model | Architecture | VQA Accuracy |
-|-------|-------------|-------------|
-| MultiModalTransformer | Custom cross-attention (end-to-end) | **0.5352** |
-| CLIPGenerator | MLP on frozen CLIP embeddings | 0.5346 |
-| CLIPGeneratorV2 | Cross-attention + cosine similarity on CLIP | 0.5050 |
+| Model | VQA Accuracy |
+|-------|-------------|
+| MultiModalTransformer (raw images + cross-attention) | **0.5352** |
+| CLIPGenerator (frozen CLIP embeddings) | 0.5346 |
+| CLIPGeneratorV2 (CLIP + cosine similarity feature) | 0.5050 |
 
 ---
 
-## Approaches
+## Models
 
-### Challenges 1 & 2 — MultiModalTransformer (end-to-end)
+### MultiModalTransformer
 
-A custom multimodal architecture trained directly on raw images and tokenized questions.
+A custom end-to-end architecture trained on raw images and tokenized questions.
 
-- **Image encoder:** patch-based Conv2d projection (32×32 patches → 49 tokens) with learned positional embeddings
-- **Text encoder:** word-level embedding with learned positional encoding
-- **Fusion:** separate self-attention over image and text sequences, followed by cross-attention where text tokens attend to image patch keys/values
-- **Challenge 1:** binary answerability classification head
-- **Challenge 2:** closed-set answer generation head over top-3000 answer vocabulary, trained with frequency-weighted cross-entropy loss and augmented images (random crop, horizontal flip, color jitter)
+- Images are split into 49 patches (32×32) and projected to a shared embedding space
+- Questions are encoded with a word-level vocabulary and learned positional embeddings
+- Separate self-attention runs over image patches and text tokens independently
+- Cross-attention fuses them: text tokens attend to image patch keys/values
+- Two output heads: binary answerability classification and closed-set answer generation
 
-### Challenges 3 & 4 — CLIP-based Models
+Training used frequency-weighted cross-entropy loss to reduce bias toward the most common answers, along with augmented images (random crop, horizontal flip, color jitter).
 
-Operating on frozen 512-dim CLIP embeddings provided with the dataset rather than raw pixels.
+### CLIPGenerator
 
-- **CLIPGenerator:** projects image and text CLIP features independently, concatenates, and feeds through an MLP classifier
-- **CLIPGeneratorV2:** adds a cross-attention layer between projected features and appends cosine similarity between raw CLIP embeddings as an additional input feature
+Projects frozen 512-dim CLIP image and text features independently, concatenates them, and passes through an MLP to predict answers. Fast to train and competitive with the end-to-end model.
+
+### CLIPGeneratorV2
+
+Extends CLIPGenerator with a cross-attention layer between projected features and appends the cosine similarity between raw CLIP embeddings as an explicit input. Slightly underperforms the base model — likely because CLIP features are already well-aligned, making the similarity signal redundant.
 
 ---
 
 ## Setup
 
-This notebook is designed to run on **Google Colab** with a GPU runtime (A100 recommended).
+Runs on **Google Colab** with a GPU runtime.
 
-### Data
+The notebook handles downloading VizWiz images and annotations automatically. CLIP feature files need to be sourced separately and placed at `/content/vizwiz/VizWiz_CLIP.zip` before running the CLIP-based models.
 
-The following are downloaded automatically in the notebook:
-- VizWiz annotations (`train.json`, `val.json`, `test.json`)
-- VizWiz images (`train.zip`, `val.zip`, `test.zip`)
-
-The CLIP feature file (`VizWiz_CLIP.zip`) must be downloaded manually from your course Canvas and placed at `/content/vizwiz/VizWiz_CLIP.zip` before running Challenges 3 and 4.
-
-### Training details
+### Training configuration
 
 | Setting | Value |
 |---------|-------|
-| Training subset | 10,000 samples (50% of train set), `random.seed(42)` |
+| Training subset | 10,000 samples, `random.seed(42)` |
 | Optimizer | AdamW |
-| Scheduler | Cosine annealing |
+| LR scheduler | Cosine annealing |
 | Early stopping | Patience = 5 |
 | Batch size | 64 |
-| Hardware | A100 GPU (Google Colab) |
+| Hardware | A100 GPU |
 
 ---
 
-## Repo Structure
+## Observations
 
-```
-VizWiz-Multimodal-VQA/
-├── VizWiz_VQA_Multimodal.ipynb   # Main notebook (all 4 challenges)
-└── README.md
-```
+**Answer distribution collapse.** Without loss reweighting, all models converged to predicting high-frequency answers — particularly "unanswerable" and "yes" — within the first few epochs, achieving superficially acceptable top-1 accuracy while essentially ignoring question content. Switching to log-smoothed inverse frequency weighting (`1 / (log1p(count) + 1)`) stabilized training and produced meaningful answer diversity. Raw inverse frequency weighting was too aggressive and caused instability; the log smoothing was necessary to keep gradients well-behaved.
 
----
+**Vocabulary coverage is the real ceiling.** Even with a 3,000-word answer vocabulary covering the most common training answers, a substantial portion of validation ground truth answers fall entirely outside the vocabulary. No architectural improvement can recover these — the ceiling on closed-set generation accuracy is set by vocabulary design, not model capacity. Expanding to a larger vocabulary or moving to open-ended generation would be the meaningful next step.
 
-## Key Observations
+**End-to-end vs. CLIP features.** The MultiModalTransformer matches CLIPGenerator in VQA accuracy (0.5352 vs 0.5346) despite having no pretrained visual backbone whatsoever — it learns patch embeddings from scratch on 10,000 training images. This suggests the cross-attention fusion is effectively learning to align image regions with question tokens, rather than relying on rich visual representations. Whether this holds at larger data scales is an open question.
 
-- The MultiModalTransformer matches CLIPGenerator on VQA accuracy (0.5352 vs 0.5346) despite training on raw pixels rather than pretrained features, suggesting the cross-attention fusion captures relevant visual-linguistic alignment.
-- CLIPGeneratorV2's cosine similarity feature did not improve over the base CLIPGenerator, likely because CLIP features are already well-aligned in the same embedding space, making explicit similarity redundant.
-- A significant portion of ground truth answers fall outside the top-3000 vocabulary, putting a ceiling on closed-set generation accuracy regardless of model quality.
+**Added complexity in CLIPGeneratorV2 hurt rather than helped.** Adding cosine similarity between CLIP image and text features as an explicit input, combined with cross-attention between projected features, dropped accuracy from 0.5346 to 0.5050. CLIP image and text encoders are trained to align in the same embedding space, so the cosine similarity is already implicitly captured in the concatenated features — making it explicit adds a redundant signal that likely interferes with learning rather than helping. Simpler fusion outperformed the more complex variant.
+
+**Image augmentation mattered more than architecture depth.** Increasing model depth (more transformer layers, larger d_model) produced diminishing returns on validation accuracy and sometimes hurt due to overfitting on the 10K training subset. In contrast, augmentation — particularly random cropping and color jitter — had a more consistent positive effect, likely because VizWiz images are already visually diverse and noisy, so augmentation better matches the distribution the model encounters at test time.
+
+**The answerability task is deceptively easy.** Binary classification of whether a question is answerable reached high validation accuracy quickly, but this is partly a dataset artifact — the class imbalance in VizWiz means a model predicting "answerable" for most inputs can appear to perform well. The more informative evaluation is VQA accuracy on the generation task, which penalizes both wrong answers and unanswerable predictions.
